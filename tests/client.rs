@@ -1114,3 +1114,248 @@ async fn dns_resolution_failure_is_dns_error() {
     assert!(err.is_dns(), "expected a DNS error, got: {err:?}");
     assert!(err.is_connect(), "expected is_connect() to also be true");
 }
+
+#[tokio::test]
+async fn remove_headers_strips_client_defaults() {
+    let server = server::http(move |req| async move {
+        // removed by the per-request list
+        assert!(!req.headers().contains_key(ACCEPT));
+        assert!(!req.headers().contains_key(USER_AGENT));
+        // untouched default
+        assert_eq!(req.headers()["authorization"], "Bearer test-token");
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/test", server.addr());
+
+    let client = Client::builder()
+        .no_proxy()
+        .default_headers({
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+            headers.insert(USER_AGENT, HeaderValue::from_static("my-test-client"));
+            headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer test-token"));
+            headers
+        })
+        .build()
+        .unwrap();
+
+    let res = client
+        .get(&url)
+        .remove_headers(["accept", "user-agent"])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), wreq::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn remove_headers_is_case_insensitive() {
+    let server = server::http(move |req| async move {
+        assert!(!req.headers().contains_key(USER_AGENT));
+        assert_eq!(req.headers()["accept"], "*/*");
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/test", server.addr());
+
+    let client = Client::builder()
+        .no_proxy()
+        .default_headers({
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+            headers.insert(USER_AGENT, HeaderValue::from_static("my-test-client"));
+            headers
+        })
+        .build()
+        .unwrap();
+
+    client
+        .get(&url)
+        // deliberately mixed casing, must still match
+        .remove_headers(["User-Agent"])
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_strips_request_headers() {
+    let server = server::http(move |req| async move {
+        // removal also applies to headers set on the builder itself, not
+        // just inherited client defaults.
+        assert!(!req.headers().contains_key("x-test"));
+        assert!(!req.headers().contains_key(REFERER));
+        assert_eq!(req.headers()["accept"], "*/*");
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/test", server.addr());
+
+    let client = Client::builder().no_proxy().build().unwrap();
+
+    client
+        .get(&url)
+        .header("x-test", "value")
+        .header(REFERER, "https://example.com")
+        .header(ACCEPT, "*/*")
+        .remove_headers(["X-Test", "Referer"])
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_ignores_invalid_and_absent_names() {
+    let server = server::http(move |req| async move {
+        // invalid name is ignored rather than erroring
+        assert!(!req.headers().contains_key(ACCEPT));
+        // absent name is a no-op
+        assert_eq!(req.headers()["x-keep"], "kept");
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/test", server.addr());
+
+    let client = Client::builder().no_proxy().build().unwrap();
+
+    client
+        .get(&url)
+        .header(ACCEPT, "*/*")
+        .header("x-keep", "kept")
+        .remove_headers(["not a valid header name", "x-never-set", "accept"])
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_accumulates_across_calls() {
+    let server = server::http(move |req| async move {
+        assert!(!req.headers().contains_key(ACCEPT));
+        assert!(!req.headers().contains_key(REFERER));
+        assert_eq!(req.headers()["x-keep"], "kept");
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/test", server.addr());
+
+    let client = Client::builder().no_proxy().build().unwrap();
+
+    client
+        .get(&url)
+        .header(ACCEPT, "*/*")
+        .header(REFERER, "https://example.com")
+        .header("x-keep", "kept")
+        .remove_headers(["accept"])
+        .remove_headers(["referer", "accept"])
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_strips_orig_headers_case_entries() {
+    // The case-preservation map holds an entry per spelling. Removing from
+    // the header map is enough: both `OnPreserveHeaderCallback` hooks source
+    // their values from the request headers, so a stale spelling emits
+    // nothing. This asserts the header is absent on the wire, not merely
+    // reordered.
+    let server = server::http(move |req| async move {
+        assert!(!req.headers().contains_key(USER_AGENT));
+        assert_eq!(req.headers()["accept"], "*/*");
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/test", server.addr());
+
+    let client = Client::builder()
+        .no_proxy()
+        .default_headers({
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+            headers.insert(USER_AGENT, HeaderValue::from_static("my-test-client"));
+            headers
+        })
+        .orig_headers({
+            let mut orig_headers = OrigHeaderMap::new();
+            orig_headers.insert("user-agent");
+            orig_headers.insert("accept");
+            orig_headers
+        })
+        .build()
+        .unwrap();
+
+    client
+        .get(&url)
+        .remove_headers(["user-agent"])
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_does_not_affect_other_requests() {
+    let server = server::http(move |req| async move {
+        if req.uri() == "/strip" {
+            assert!(!req.headers().contains_key(ACCEPT));
+        } else {
+            assert_eq!(req.headers()["accept"], "*/*");
+        }
+        http::Response::default()
+    });
+
+    let client = Client::builder()
+        .no_proxy()
+        .default_headers({
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+            headers
+        })
+        .build()
+        .unwrap();
+
+    let base = format!("http://{}", server.addr());
+
+    client
+        .get(format!("{base}/strip"))
+        .remove_headers(["accept"])
+        .send()
+        .await
+        .unwrap();
+
+    // the marker is per-request; the next request still gets the default
+    client.get(format!("{base}/keep")).send().await.unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_works_with_default_headers_disabled() {
+    let server = server::http(move |req| async move {
+        // defaults never merged in, removal is a harmless no-op
+        assert!(!req.headers().contains_key(ACCEPT));
+        assert_eq!(req.headers()["x-keep"], "kept");
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/test", server.addr());
+
+    let client = Client::builder()
+        .no_proxy()
+        .default_headers({
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+            headers
+        })
+        .build()
+        .unwrap();
+
+    client
+        .get(&url)
+        .header("x-keep", "kept")
+        .default_headers(false)
+        .remove_headers(["accept"])
+        .send()
+        .await
+        .unwrap();
+}

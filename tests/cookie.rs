@@ -361,3 +361,91 @@ async fn cookie_request_order_matches_chromium() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn remove_headers_suppresses_jar_cookie() {
+    let server = server::http(move |req| async move {
+        match req.uri().path() {
+            // control: the jar cookie is sent when no removal list is given
+            "/2" => assert_eq!(req.headers()["cookie"], "key=val"),
+            // the jar had a cookie to send, but the removal list wins
+            "/3" => assert!(
+                !req.headers().contains_key(COOKIE),
+                "jar must not re-attach a removed Cookie header"
+            ),
+            _ => {}
+        }
+        http::Response::builder()
+            .header("Set-Cookie", "key=val; HttpOnly")
+            .body(Default::default())
+            .unwrap()
+    });
+
+    let client = Client::builder().cookie_store(true).build().unwrap();
+
+    let base = format!("http://{}", server.addr());
+    client.get(format!("{base}/")).send().await.unwrap();
+
+    // control: without the removal list the jar cookie is sent
+    client.get(format!("{base}/2")).send().await.unwrap();
+
+    client
+        .get(format!("{base}/3"))
+        .remove_headers(["Cookie"])
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_cookie_is_case_insensitive() {
+    let server = server::http(move |req| async move {
+        if req.uri() == "/2" {
+            assert!(!req.headers().contains_key(COOKIE));
+        }
+        http::Response::builder()
+            .header("Set-Cookie", "key=val; HttpOnly")
+            .body(Default::default())
+            .unwrap()
+    });
+
+    let client = Client::builder().cookie_store(true).build().unwrap();
+
+    let base = format!("http://{}", server.addr());
+    client.get(format!("{base}/")).send().await.unwrap();
+
+    client
+        .get(format!("{base}/2"))
+        .remove_headers(["cOoKiE"])
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remove_headers_explicit_cookie_header_is_stripped() {
+    let server = server::http(move |req| async move {
+        if req.uri() == "/2" {
+            assert!(!req.headers().contains_key(COOKIE));
+        }
+        http::Response::builder()
+            .header("Set-Cookie", "key=val; HttpOnly")
+            .body(Default::default())
+            .unwrap()
+    });
+
+    let client = Client::builder().cookie_store(true).build().unwrap();
+
+    let base = format!("http://{}", server.addr());
+    client.get(format!("{base}/")).send().await.unwrap();
+
+    // a hand-set Cookie is stripped too, and does not block the jar from
+    // re-attaching because the jar never gets the chance to run.
+    client
+        .get(format!("{base}/2"))
+        .header(COOKIE, "manual=1")
+        .remove_headers(["cookie"])
+        .send()
+        .await
+        .unwrap();
+}

@@ -4,7 +4,7 @@ use std::{
 };
 
 use futures_util::future::{self, Either, Ready};
-use http::{HeaderMap, Request, Response, Version};
+use http::{HeaderMap, HeaderName, Request, Response, Version};
 use tower::{Layer, Service};
 use wreq_proto::{http1::Http1Options, http2::Http2Options};
 
@@ -16,6 +16,14 @@ use crate::{
 /// A marker type for the default headers configuration value.
 #[derive(Clone, Copy)]
 pub(crate) struct DefaultHeaders;
+
+/// A marker type for the per-request header removal list.
+///
+/// Names listed here are stripped from the request headers *after* client
+/// defaults (including emulation defaults) have been merged in, which makes
+/// this the only per-request way to subtract from an inherited header set.
+#[derive(Clone, Copy)]
+pub(crate) struct RemoveHeaders;
 
 /// Per-request configuration for proxy, protocol, and transport options.
 /// Overrides client defaults for a single request.
@@ -54,6 +62,10 @@ pub struct ConfigService<S> {
 // ===== impl DefaultHeaders =====
 
 impl_request_config_value!(DefaultHeaders, bool);
+
+// ===== impl RemoveHeaders =====
+
+impl_request_config_value!(RemoveHeaders, Vec<HeaderName>);
 
 // ===== impl RequestOptions =====
 
@@ -125,6 +137,27 @@ where
             let mut dest = self.config.headers.clone();
             crate::util::replace_headers(&mut dest, std::mem::take(req.headers_mut()));
             std::mem::swap(req.headers_mut(), &mut dest);
+        }
+
+        // strip the headers the caller asked to remove. this runs after the
+        // default merge above so it can subtract from client and emulation
+        // defaults, not just from headers set on this builder.
+        //
+        // stale entries left in the original-header map are harmless: both
+        // `OnPreserveHeaderCallback` hooks read their values out of this map,
+        // so a name that is no longer present here emits nothing.
+        //
+        // the map is moved aside because the removal list lives in the request
+        // extensions, which cannot be borrowed mutably at the same time. the
+        // common case (nothing to remove) skips the move entirely.
+        if RequestConfig::<RemoveHeaders>::get(req.extensions()).is_some() {
+            let mut headers = std::mem::take(req.headers_mut());
+            if let Some(remove) = RequestConfig::<RemoveHeaders>::get(req.extensions()) {
+                for name in remove {
+                    headers.remove(name);
+                }
+            }
+            *req.headers_mut() = headers;
         }
 
         // store the original headers in request extensions

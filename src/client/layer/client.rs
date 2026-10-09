@@ -32,6 +32,7 @@ use wreq_proto::{
 };
 #[cfg(feature = "cookies")]
 use {
+    crate::client::layer::config::RemoveHeaders,
     crate::cookie::{CookieStore, Cookies},
     http::header::COOKIE,
     std::sync::Arc,
@@ -286,11 +287,18 @@ where
         #[cfg(feature = "cookies")]
         let cookie_store = self.cookie_store.fetch(req.extensions()).cloned();
 
+        // `ConfigService` already stripped the headers the caller asked to
+        // remove, so without this the jar would immediately re-attach the very
+        // `Cookie` header that was just removed.
+        #[cfg(feature = "cookies")]
+        let no_cookie = RequestConfig::<RemoveHeaders>::get(req.extensions())
+            .is_some_and(|removed| removed.contains(&COOKIE));
+
         #[cfg(feature = "cookies")]
         if let Some(ref cookie_store) = cookie_store {
             let headers = req.headers_mut();
 
-            if !headers.contains_key(COOKIE) {
+            if !no_cookie && !headers.contains_key(COOKIE) {
                 let version = if pooled.is_http2() {
                     Version::HTTP_2
                 } else {

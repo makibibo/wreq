@@ -193,6 +193,23 @@ impl WebSocketRequestBuilder {
         self
     }
 
+    /// Remove headers from the outgoing request.
+    ///
+    /// Names listed here are stripped from the final headers after client
+    /// defaults have been merged, and they suppress the `Cookie` header that a
+    /// cookie store would otherwise attach. Matching is case-insensitive, and
+    /// names that are not valid header names are ignored.
+    ///
+    /// See [`RequestBuilder::remove_headers`](crate::RequestBuilder::remove_headers).
+    pub fn remove_headers<I, S>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.inner = self.inner.remove_headers(headers);
+        self
+    }
+
     /// Enable HTTP authentication.
     ///
     /// ```rust

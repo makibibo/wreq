@@ -25,7 +25,7 @@ use super::{
     Body, Client, IntoEmulation, Response,
     future::Pending,
     layer::{
-        config::{DefaultHeaders, RequestOptions},
+        config::{DefaultHeaders, RemoveHeaders, RequestOptions},
         timeout::TimeoutOptions,
     },
 };
@@ -287,6 +287,55 @@ impl RequestBuilder {
     pub fn default_headers(mut self, enable: bool) -> RequestBuilder {
         if let Ok(ref mut req) = self.request {
             req.config_mut::<DefaultHeaders>().replace(enable);
+        }
+        self
+    }
+
+    /// Remove headers from the outgoing request.
+    ///
+    /// Names listed here are stripped from the final headers *after* client
+    /// defaults have been merged — including the defaults contributed by an
+    /// [`Emulation`](crate::Emulation) profile — and they suppress the
+    /// `Cookie` header that a cookie store would otherwise attach, so no
+    /// extra client is needed to opt out of a header a profile sets.
+    ///
+    /// Matching is case-insensitive. Names that are not valid header names are
+    /// ignored, and listing a header that is not present is a no-op.
+    ///
+    /// **NOTE:** This does not affect headers that the transport injects when
+    /// the request is actually sent, so listing them has no effect. That
+    /// excludes `Host`, which is regenerated for every HTTP/1 request when
+    /// absent, and, for proxied requests, `Proxy-Authorization` along with any
+    /// custom headers configured on the [`Proxy`] itself.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use wreq::Error;
+    /// # async fn run() -> Result<(), Error> {
+    /// let res = wreq::get("https://httpbin.org/get")
+    ///     .remove_headers(["Accept-Language", "Cookie"])
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// }
+    /// ```
+    pub fn remove_headers<I, S>(mut self, headers: I) -> RequestBuilder
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if let Ok(ref mut req) = self.request {
+            let removed = req
+                .config_mut::<RemoveHeaders>()
+                .get_or_insert_with(Vec::new);
+            for header in headers {
+                if let Ok(name) = HeaderName::try_from(header.as_ref())
+                    && !removed.contains(&name)
+                {
+                    removed.push(name);
+                }
+            }
         }
         self
     }
